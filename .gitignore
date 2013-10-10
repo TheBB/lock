@@ -1,1 +1,6 @@
 *.swp
+*.hi
+*.o
+*.st
+*.enc
+lock
