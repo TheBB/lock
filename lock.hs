@@ -117,8 +117,7 @@ parseTime :: String -> Maybe Integer
 parseTime = parseAcc 0 0
     where parseAcc glob loc (c:cs)
               | isDigit c = parseAcc glob (10*loc + fromIntegral (digitToInt c)) cs
-              | c `elem` "smhdw" = let Just mul = lookup c timeMults
-                              in parseAcc (glob + mul*loc) 0 cs
+              | c `elem` "smhdw" = let Just mul = lookup c timeMults in parseAcc (glob + mul*loc) 0 cs
               | otherwise = Nothing
           parseAcc glob loc [] = Just (glob + loc)
 
