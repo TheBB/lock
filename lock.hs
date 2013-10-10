@@ -129,6 +129,25 @@ maybeReadTime prompt = do
     case time of
         Nothing -> fail "Unable to parse time"
         Just t -> return t
+
+showTime :: Integer -> String
+showTime 0 = "0 seconds"
+showTime n
+    | length lst > 1 = (intercalate ", " . init) lst ++ " and " ++ last lst
+    | otherwise = last lst
+    where lst = accLst [] n
+          accLst acc 0 = reverse acc
+          accLst acc n = let (per, perStr) = getPer n
+                             d = n `div` per
+                             str = (show d ++ " " ++ perStr ++ (if d >= 1 then "s" else ""))
+                         in accLst (str:acc) (n `mod` per)
+          getPer n
+              | n >= week = (week, "week")
+              | n >= day = (day, "day")
+              | n >= hour = (hour, "hour")
+              | n >= minute = (minute, "minute")
+              | n >= second = (second, "second")
+          (week, day, hour, minute, second) = (7*24*60*60, 24*60*60, 60*60, 60, 1)
 -- }}}
 
 -- {{{ Start new session
@@ -151,10 +170,25 @@ writeStatusState = get >>= liftIO . writeStatus
 printStatus :: StateIO ()
 printStatus = get >>= lift . outputStrLn . show
 
+unlock :: StateIO ()
+unlock = do
+    st <- get
+    time <- liftIO getTime
+    case time of
+        Nothing -> lift $ outputStrLn "Failed to get time."
+        Just t -> if t >= timeUnlock st
+                     then performUnlock >> lift (outputStrLn "Unlocked." >> exitSuccess)
+                     else lift $ outputStrLn $ "Can't unlock for another " ++ showTime (timeUnlock st - t) ++ "."
+    where performUnlock = do
+              st <- get
+              plainText <- liftIO $ readEncrypted $ encFile st
+              liftIO $ BS.writeFile (encFile st ++ ".restored") plainText
+
 commands = [
              ("help",       ("print this help", lift $ outputStrLn help))
            , ("exit",       ("save status to disk and exit", writeStatusState >> lift exitSuccess))
            , ("save",       ("save status to disk", writeStatusState))
+           , ("unlock",     ("unlock and exit", unlock))
            , ("dbg",        ("print debugging information", printStatus))
            ]
 help = let line = (\c -> fst c ++ replicate (15 - length (fst c)) ' ' ++ fst (snd c))
