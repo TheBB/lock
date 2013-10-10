@@ -5,7 +5,7 @@ import Codec.Encryption.Padding (pkcs5, unPkcs5)
 import Control.Monad.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans (lift)
 import Data.Bits ((.|.), shiftL, shiftR)
-import Data.ByteString as BS (pack, readFile, unpack, writeFile)
+import Data.ByteString as BS (pack, readFile, unpack, writeFile, ByteString)
 import Data.Char (isDigit, digitToInt)
 import Data.Maybe (isNothing)
 import Data.LargeWord (Word128)
@@ -38,38 +38,41 @@ import Text.Regex (matchRegex, mkRegex)
 
 version = "lock version 0.0.1"
 
+-- {{{ Monad transformers
+type InputIO = InputT IO
+type MaybeIO = MaybeT InputIO
+
+maybeRun :: InputIO (Maybe a) -> MaybeIO a
+maybeRun act = do
+    res <- lift act
+    case res of
+        Nothing -> fail ""
+        Just s -> return s
+-- }}}
+
 -- {{{ Encryption
 key = 0x06a9214036b8a15b512e03d534120006 :: Word128
 iv  = 0x3dafba429d9eb430b422da802c9fac41 :: Word128
 
-loadPlain :: FilePath -> IO [Word8]
-loadPlain fn = do
-    plain <- BS.readFile fn
-    return (BS.unpack plain)
+readEncrypted :: FilePath -> IO ByteString
+readEncrypted fn = do
+    ciphertext <- BS.readFile fn
+    return $ pack $ unPkcs5 $ unCbc decrypt iv key $ (bytesToWords . unpack) ciphertext
 
-writePlain :: FilePath -> [Word8] -> IO ()
-writePlain fn bytes = do
-    BS.writeFile fn (BS.pack bytes)
-
-loadEncrypted :: FilePath -> IO [Word8]
-loadEncrypted fn = do
-    ciphertext <- loadPlain fn
-    return $ unPkcs5 $ unCbc decrypt iv key (bytesToWords ciphertext)
-
-writeEncrypted :: FilePath -> [Word8] -> IO ()
+writeEncrypted :: FilePath -> ByteString -> IO ()
 writeEncrypted fn bytes = do
-    let ciphertext = cbc encrypt iv key (pkcs5 bytes)
-    writePlain fn (wordsToBytes ciphertext)
+    let ciphertext = cbc encrypt iv key $ (pkcs5 . unpack) bytes
+    BS.writeFile fn $ (pack . wordsToBytes) ciphertext
 
 dostuff :: IO ()
 dostuff = do
-    bytes <- loadPlain "test.txt"
+    bytes <- BS.readFile "test.txt"
     writeEncrypted "test-enc.txt" bytes
 
 redostuff :: IO ()
 redostuff = do
-    bytes <- loadEncrypted "test-enc.txt"
-    writePlain "test-dec.txt" bytes
+    bytes <- readEncrypted "test-enc.txt"
+    BS.writeFile "test-dec.txt" bytes
 
 fixshiftR :: Word128 -> Int -> Word128
 fixshiftR w s = fromIntegral $ (fromIntegral w :: Integer) `shiftR` s
@@ -133,11 +136,6 @@ data Status = Status {
     deriving (Read, Show)
 -- }}}
 
--- {{{ Monad transformers
-type InputIO = InputT IO
-type MaybeIO = MaybeT InputIO
--- }}}
-
 -- {{{ Start new session
 startNewSession :: String -> MaybeIO Status
 startNewSession fp = do
@@ -163,13 +161,6 @@ wordList = ["alfa", "bravo", "charlie", "chinchilla"]
 searchFunc :: String -> [Completion]
 searchFunc s = map simpleCompletion $ filter (s `isPrefixOf`) wordList
 hlSettings = setComplete (completeWord Nothing " \t" $ return . searchFunc) defaultSettings
-
-maybeRun :: InputIO (Maybe a) -> MaybeIO a
-maybeRun act = do
-    res <- lift act
-    case res of
-        Nothing -> fail ""
-        Just s -> return s
 
 exitSuccess = lift System.Exit.exitSuccess :: InputIO a
 exitFailure = lift System.Exit.exitFailure :: InputIO a
