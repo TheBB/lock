@@ -2,14 +2,18 @@
 import Codec.Encryption.AES (decrypt, encrypt)
 import Codec.Encryption.Modes (cbc, unCbc)
 import Codec.Encryption.Padding (pkcs5, unPkcs5)
+import Control.Monad (when)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Maybe (MaybeT, runMaybeT)
+import Control.Monad.State.Strict (StateT, evalStateT, get, put)
 import Control.Monad.Trans (lift)
 import Data.Bits ((.|.), shiftL, shiftR)
 import Data.ByteString as BS (pack, readFile, unpack, writeFile, ByteString)
+import Data.ByteString.UTF8 (fromString, toString)
 import Data.Char (isDigit, digitToInt)
 import Data.Maybe (isNothing)
 import Data.LargeWord (Word128)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, intercalate)
 import Data.List.Split (chunksOf)
 import Data.Word (Word8)
 import Network.HTTP (getResponseBody, getRequest, simpleHTTP)
@@ -38,9 +42,18 @@ import Text.Regex (matchRegex, mkRegex)
 
 version = "lock version 0.0.1"
 
--- {{{ Monad transformers
+-- {{{ Types and monad transformers
+data Status = Status {
+                       statusFile :: FilePath
+                     , encFile :: FilePath
+                     , timeStarted :: Integer 
+                     , timeUnlock :: Integer
+                     }
+    deriving (Read, Show)
+
 type InputIO = InputT IO
 type MaybeIO = MaybeT InputIO
+type StateIO = StateT Status InputIO
 
 maybeRun :: InputIO (Maybe a) -> MaybeIO a
 maybeRun act = do
@@ -63,16 +76,6 @@ writeEncrypted :: FilePath -> ByteString -> IO ()
 writeEncrypted fn bytes = do
     let ciphertext = cbc encrypt iv key $ (pkcs5 . unpack) bytes
     BS.writeFile fn $ (pack . wordsToBytes) ciphertext
-
-dostuff :: IO ()
-dostuff = do
-    bytes <- BS.readFile "test.txt"
-    writeEncrypted "test-enc.txt" bytes
-
-redostuff :: IO ()
-redostuff = do
-    bytes <- readEncrypted "test-enc.txt"
-    BS.writeFile "test-dec.txt" bytes
 
 fixshiftR :: Word128 -> Int -> Word128
 fixshiftR w s = fromIntegral $ (fromIntegral w :: Integer) `shiftR` s
@@ -128,20 +131,52 @@ maybeReadTime prompt = do
         Just t -> return t
 -- }}}
 
--- {{{ Lock status
-data Status = Status {
-                       timeStarted :: Integer 
-                     , timeUnlock :: Integer
-                     }
-    deriving (Read, Show)
--- }}}
-
 -- {{{ Start new session
 startNewSession :: String -> MaybeIO Status
 startNewSession fp = do
     initTime <- maybeRun (lift getTime)
     initLen <- maybeReadTime "Initial time to unlock: "
-    return (Status initTime (initTime + initLen))
+    plainText <- liftIO $ BS.readFile fp
+    liftIO $ writeEncrypted (fp ++ ".enc") plainText
+    return (Status (fp ++ ".st") (fp ++ ".enc") initTime (initTime + initLen))
+-- }}}
+
+-- {{{ Main program loop
+writeStatus :: Status -> IO ()
+writeStatus st = writeEncrypted (statusFile st) $ (fromString . show) st
+
+writeStatusState :: StateIO ()
+writeStatusState = get >>= liftIO . writeStatus
+
+printStatus :: StateIO ()
+printStatus = get >>= lift . outputStrLn . show
+
+commands = [
+             ("help",       ("print this help", lift $ outputStrLn help))
+           , ("exit",       ("save status to disk and exit", writeStatusState >> lift exitSuccess))
+           , ("save",       ("save status to disk", writeStatusState))
+           , ("dbg",        ("print debugging information", printStatus))
+           ]
+help = let line = (\c -> fst c ++ replicate (15 - length (fst c)) ' ' ++ fst (snd c))
+       in (intercalate "\n" . map line) commands
+
+enterLoop :: StateIO ()
+enterLoop = do
+    lift $ outputStrLn "Type \"help\" for a list of commands."
+    loop 
+
+loop :: StateIO ()
+loop = do
+    inp <- lift $ getInputLine ">> "
+    when (isNothing inp) (writeStatusState >> lift exitFailure)
+    let Just s = inp
+    case words s of
+        [] -> loop
+        (cmd:args) -> case lookup cmd commands of
+                         Just act -> snd act >> loop
+                         Nothing -> do
+                             lift $ outputStrLn $ "Unrecognized command: '" ++ cmd ++ "'"
+                             loop
 -- }}}
 
 -- {{{ Main option processing and Haskeline settings
@@ -157,9 +192,8 @@ options = [
 
 usage = usageInfo "Usage: lock OPTION" options
 
-wordList = ["alfa", "bravo", "charlie", "chinchilla"]
 searchFunc :: String -> [Completion]
-searchFunc s = map simpleCompletion $ filter (s `isPrefixOf`) wordList
+searchFunc s = map simpleCompletion $ filter (s `isPrefixOf`) (map fst commands)
 hlSettings = setComplete (completeWord Nothing " \t" $ return . searchFunc) defaultSettings
 
 exitSuccess = lift System.Exit.exitSuccess :: InputIO a
@@ -170,14 +204,19 @@ processFlags [] = return ()
 processFlags (flag:flags) = processFlag flag >> processFlags flags
 
 processFlag :: Flag -> InputIO ()
-processFlag Version = outputStrLn version >> exitSuccess
-processFlag Help = outputStrLn usage >> exitSuccess
+processFlag Version = outputStrLn version
+processFlag Help = outputStrLn usage
 processFlag (Image fp) = do
     status <- runMaybeT (startNewSession fp)
     case status of
         Nothing -> outputStrLn "Unable to start session" >> exitFailure
-        Just st -> outputStrLn (show st) >> exitSuccess
-processFlag (Session fp) = outputStrLn ("Session: " ++ fp) >> exitSuccess
+        Just st -> do
+            lift $ writeStatus st
+            evalStateT enterLoop st
+processFlag (Session fp) = do
+    bs <- lift $ readEncrypted (fp ++ ".st")
+    let st = (read . toString) bs :: Status
+    evalStateT enterLoop st
 
 main :: IO ()
 main = do
