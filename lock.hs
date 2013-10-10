@@ -2,13 +2,35 @@
 import Codec.Encryption.AES (decrypt, encrypt)
 import Codec.Encryption.Modes (cbc, unCbc)
 import Codec.Encryption.Padding (pkcs5, unPkcs5)
+import Control.Monad.Trans (lift)
 import Data.Bits ((.|.), shiftL, shiftR)
 import Data.ByteString as BS (pack, readFile, unpack, writeFile)
 import Data.Maybe (isNothing)
 import Data.LargeWord (Word128)
+import Data.List (isPrefixOf)
 import Data.List.Split (chunksOf)
 import Data.Word (Word8)
 import Network.HTTP (getResponseBody, getRequest, simpleHTTP)
+import System (getArgs)
+import System.Console.GetOpt 
+    ( 
+      getOpt
+    , usageInfo
+    , ArgOrder (RequireOrder)
+    , OptDescr (Option)
+    , ArgDescr (NoArg, ReqArg)
+    )
+import System.Console.Haskeline 
+    (
+      defaultSettings
+    , runInputT
+    , outputStrLn
+    , getInputLine
+    , setComplete
+    , InputT
+    )
+import System.Console.Haskeline.Completion (completeWord, simpleCompletion, Completion)
+import qualified System.Exit (exitSuccess, exitFailure)
 import Text.Regex (matchRegex, mkRegex)
 -- }}}
 
@@ -45,9 +67,12 @@ redostuff = do
     bytes <- loadEncrypted "test-enc.txt"
     writePlain "test-dec.txt" bytes
 
+fixshiftR :: Word128 -> Int -> Word128
+fixshiftR w s = fromIntegral $ (fromIntegral w :: Integer) `shiftR` s
+
 shifts128 = [120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0]
 wordToBytes :: Word128 -> [Word8]
-wordToBytes w = [fromIntegral (w `shiftR` k) | k <- shifts128]
+wordToBytes w = [fromIntegral (w `fixshiftR` k) | k <- shifts128]
 
 bytesToWord :: [Word8] -> Word128
 bytesToWord = foldl accum 0
@@ -76,4 +101,59 @@ getTime = do
         Nothing -> getTimeUTS
     where getTimeCTS = getTimeSite "http://www.currenttimestamp.com/" "\\s*current_time\\s*=\\s*([0-9]+);\\s*"
           getTimeUTS = getTimeSite "http://www.unixtimestamp.com/" "\\s*([0-9]+)\\s*UTC"
+-- }}}
+
+-- {{{ Lock status
+data Status = Status { timeStarted :: Integer }
+    deriving (Read, Show)
+-- }}}
+
+-- {{{ Start new session
+startNewSession :: FilePath -> InputT IO ()
+startNewSession fp = do
+    inp <- getInputLine "Initial time to release: "
+    case inp of
+        Nothing -> return ()
+        Just s -> outputStrLn s
+-- }}}
+
+-- {{{ Main option processing and Haskeline settings
+data Flag = Version | Help | Image FilePath | Session FilePath
+
+options :: [OptDescr Flag]
+options = [ 
+            Option []    ["version"]    (NoArg Version)             "show version number" 
+          , Option []    ["help"]       (NoArg Help)                "show version number" 
+          , Option ['i'] ["image"]      (ReqArg Image "FILE")       "start new session"
+          , Option ['s'] ["session"]    (ReqArg Session "FILE")     "open existing session"
+          ]
+
+usage = usageInfo "Usage: lock OPTION" options
+
+wordList = ["alfa", "bravo", "charlie", "chinchilla"]
+searchFunc :: String -> [Completion]
+searchFunc s = map simpleCompletion $ filter (s `isPrefixOf`) wordList
+hlSettings = setComplete (completeWord Nothing " \t" $ return . searchFunc) defaultSettings
+
+exitSuccess = lift System.Exit.exitSuccess :: InputT IO a
+exitFailure = lift System.Exit.exitFailure :: InputT IO a
+
+processFlags :: [Flag] -> InputT IO ()
+processFlags [] = return ()
+processFlags (flag:flags) = processFlag flag >> processFlags flags
+
+processFlag :: Flag -> InputT IO ()
+processFlag Version = outputStrLn "v 0.1" >> exitSuccess
+processFlag Help = outputStrLn usage >> exitSuccess
+processFlag (Image fp) = startNewSession fp >> exitSuccess
+processFlag (Session fp) = outputStrLn ("Session: " ++ fp) >> exitSuccess
+
+main :: IO ()
+main = do
+    args <- getArgs
+    case getOpt RequireOrder options args of
+        ([], [], [])     -> putStrLn usage
+        (flags, [], [])  -> runInputT hlSettings (processFlags flags)
+        (_, nonOpts, []) -> error $ "Unrecognized arguments: " ++ unwords nonOpts
+        (_, _, msgs)     -> error $ concat msgs ++ usage
 -- }}}
