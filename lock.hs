@@ -11,13 +11,13 @@ import Data.Bits ((.|.), shiftL, shiftR)
 import Data.ByteString as BS (pack, readFile, unpack, writeFile, ByteString)
 import Data.ByteString.UTF8 (fromString, toString)
 import Data.Char (isDigit, digitToInt)
-import Data.Maybe (isNothing)
+import Data.Maybe (isJust, isNothing)
 import Data.LargeWord (Word128)
 import Data.List (isPrefixOf, intercalate)
 import Data.List.Split (chunksOf)
 import Data.Word (Word8)
 import Network.HTTP (getResponseBody, getRequest, simpleHTTP)
-import System (getArgs)
+import System.Environment (getArgs)
 import System.Console.GetOpt 
     ( 
       getOpt
@@ -46,8 +46,10 @@ version = "lock version 0.0.1"
 data Status = Status {
                        statusFile :: FilePath
                      , encFile :: FilePath
+                     , origFile :: FilePath
                      , timeStarted :: Integer 
                      , timeUnlock :: Integer
+                     , penaltyLength :: Integer
                      }
     deriving (Read, Show)
 
@@ -88,9 +90,9 @@ bytesToWord :: [Word8] -> Word128
 bytesToWord = foldl accum 0
     where accum a b = (a `shiftL` 8) .|. fromIntegral b
 
-wordsToBytes = concat . (map wordToBytes)
+wordsToBytes = concatMap wordToBytes
 
-bytesToWords = (map bytesToWord) . chunksOf 16
+bytesToWords = map bytesToWord . chunksOf 16
 -- }}}
 
 -- {{{ Time
@@ -99,8 +101,8 @@ getTimeSite uri regex = do
     rsp <- simpleHTTP (getRequest uri)
     txt <- getResponseBody rsp
     let matches = map (matchRegex (mkRegex regex)) $ lines txt
-    case filter (not . isNothing) matches of
-        ((Just m):_) -> return $ Just ((read . head) m :: Integer)
+    case filter isJust matches of
+        (Just m:_) -> return $ Just ((read . head) m :: Integer)
         [] -> return Nothing
 
 getTime :: IO (Maybe Integer)
@@ -154,9 +156,10 @@ startNewSession :: String -> MaybeIO Status
 startNewSession fp = do
     initTime <- maybeRun (lift getTime)
     initLen <- maybeReadTime "Initial time to unlock: "
+    penaltyLen <- maybeReadTime "Penalty length: "
     plainText <- liftIO $ BS.readFile fp
     liftIO $ writeEncrypted (fp ++ ".enc") plainText
-    return (Status (fp ++ ".st") (fp ++ ".enc") initTime (initTime + initLen))
+    return (Status (fp ++ ".st") (fp ++ ".enc") fp initTime (initTime + initLen) penaltyLen)
 -- }}}
 
 -- {{{ Main program loop
@@ -176,21 +179,33 @@ unlock = do
     case time of
         Nothing -> lift $ outputStrLn "Failed to get time."
         Just t -> if t >= timeUnlock st
-                     then performUnlock >> lift (outputStrLn "Unlocked." >> exitSuccess)
-                     else lift $ outputStrLn $ "Can't unlock for another " ++ showTime (timeUnlock st - t) ++ "."
+                 then performUnlock >> lift (outputStrLn "Unlocked." >> exitSuccess)
+                 else lift $ outputStrLn $ "Can't unlock for another " ++ showTime (timeUnlock st - t) ++ "."
     where performUnlock = do
               st <- get
               plainText <- liftIO $ readEncrypted $ encFile st
-              liftIO $ BS.writeFile (encFile st ++ ".restored") plainText
+              liftIO $ BS.writeFile (origFile st ++ ".restored") plainText
+
+penalty :: StateIO ()
+penalty = do
+    severity <- lift $ getInputLine "Severity: "
+    case severity of
+        Nothing -> lift $ outputStrLn "No penalty added."
+        Just sv -> do
+            st <- get
+            put st { timeUnlock = timeUnlock st + read sv * penaltyLength st }
+            lift $ outputStrLn $ "Penalized by " ++ showTime (read sv * penaltyLength st) ++ "."
+            writeStatusState
 
 commands = [
              ("help",       ("print this help", lift $ outputStrLn help))
            , ("exit",       ("save status to disk and exit", writeStatusState >> lift exitSuccess))
            , ("save",       ("save status to disk", writeStatusState))
            , ("unlock",     ("unlock and exit", unlock))
+           , ("penalty",    ("add a penalty", penalty))
            , ("dbg",        ("print debugging information", printStatus))
            ]
-help = let line = (\c -> fst c ++ replicate (15 - length (fst c)) ' ' ++ fst (snd c))
+help = let line c = fst c ++ replicate (15 - length (fst c)) ' ' ++ fst (snd c)
        in (intercalate "\n" . map line) commands
 
 enterLoop :: StateIO ()
@@ -217,10 +232,11 @@ data Flag = Version | Help | Image FilePath | Session FilePath
 
 options :: [OptDescr Flag]
 options = [ 
-            Option []    ["version"]    (NoArg Version)             "show version number" 
-          , Option []    ["help"]       (NoArg Help)                "show version number" 
-          , Option ['i'] ["image"]      (ReqArg Image "FILE")       "start new session"
-          , Option ['s'] ["session"]    (ReqArg Session "FILE")     "open existing session"
+                        
+            Option []   ["version"]     (NoArg Version)             "show version number" 
+          , Option []   ["help"]        (NoArg Help)                "show version number" 
+          , Option "i"  ["image"]       (ReqArg Image "FILE")       "start new session"
+          , Option "s"  ["session"]     (ReqArg Session "FILE")     "open existing session"
           ]
 
 usage = usageInfo "Usage: lock OPTION" options
@@ -233,8 +249,7 @@ exitSuccess = lift System.Exit.exitSuccess :: InputIO a
 exitFailure = lift System.Exit.exitFailure :: InputIO a
 
 processFlags :: [Flag] -> InputIO ()
-processFlags [] = return ()
-processFlags (flag:flags) = processFlag flag >> processFlags flags
+processFlags = foldr ((>>) . processFlag) (return ())
 
 processFlag :: Flag -> InputIO ()
 processFlag Version = outputStrLn version
