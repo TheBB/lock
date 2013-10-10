@@ -1,12 +1,18 @@
 import Control.Monad.State
 import Data.Bits hiding (rotate)
+import Data.LargeWord (Word128)
 import Data.Word
 import qualified Data.Vector.Unboxed as V
+import Numeric
 
 key = [0x06a92140, 0x36b8a15b, 0x512e03d5, 0x34120006] :: [Word32]
 
 toOctets :: Word32 -> [Word8]
 toOctets w = [fromIntegral (w `shiftR` k) | k <- [24, 16, 8, 0]]
+
+shifts128 = [120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0]
+izOctets :: Word128 -> [Word8]
+izOctets w = [fromIntegral (w `shiftR` k) | k <- shifts128]
 
 fromOctets :: [Word8] -> Word32
 fromOctets = foldl accum 0
@@ -61,6 +67,19 @@ subWord fn = fromOctets . map fn . toOctets
 fsubWord = subWord fsubByte
 isubWord = subWord isubByte
 -- }}}
+
+byteToString :: Word8 -> String
+byteToString b = replicate (2 - length s) '0' ++ s
+    where s = showHex b ""
+
+bytesToString :: [Word8] -> String
+bytesToString = concat . (map byteToString)
+
+multX :: Word8 -> Word8
+multX b
+    | shifted .&. 0x80 /= 0 = shifted `xor` 0x1b
+    | otherwise = shifted
+    where shifted = b `shiftL` 1
 
 rotate :: [a] -> [a]
 rotate [] = []

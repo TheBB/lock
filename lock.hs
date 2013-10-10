@@ -1,47 +1,20 @@
 -- {{{ Imports
-import Codec.Encryption.AES ( 
-                              decrypt
-                            , encrypt
-                            )
-import Codec.Encryption.Modes ( 
-                                cbc
-                              , unCbc
-                              )
-import Codec.Encryption.Padding (
-                                  pkcs5
-                                , unPkcs5
-                                )
-import Data.ByteString as BS (
-                               pack
-                             , readFile
-                             , unpack
-                             , writeFile
-                             )
-import Data.Char ( 
-                   ord
-                 , chr
-                 )
+import Codec.Encryption.AES (decrypt, encrypt)
+import Codec.Encryption.Modes (cbc, unCbc)
+import Codec.Encryption.Padding (pkcs5, unPkcs5)
+import Data.Bits ((.|.), shiftL, shiftR)
+import Data.ByteString as BS (pack, readFile, unpack, writeFile)
 import Data.Maybe (isNothing)
 import Data.LargeWord (Word128)
 import Data.List.Split (chunksOf)
 import Data.Word (Word8)
-import Network.HTTP ( 
-                      getResponseBody
-                    , getRequest
-                    , simpleHTTP
-                    )
-import Numeric (showHex)
-import Text.Regex (
-                    matchRegex
-                  , mkRegex
-                  )
+import Network.HTTP (getResponseBody, getRequest, simpleHTTP)
+import Text.Regex (matchRegex, mkRegex)
 -- }}}
 
 -- {{{ Encryption
-
 key = 0x06a9214036b8a15b512e03d534120006 :: Word128
 iv  = 0x3dafba429d9eb430b422da802c9fac41 :: Word128
-
 
 loadPlain :: FilePath -> IO [Word8]
 loadPlain fn = do
@@ -72,30 +45,17 @@ redostuff = do
     bytes <- loadEncrypted "test-enc.txt"
     writePlain "test-dec.txt" bytes
 
-wordToString :: Word128 -> String
-wordToString w = replicate (32 - length s) '0' ++ s
-    where s = showHex (fromIntegral w) ""
+shifts128 = [120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0]
+wordToBytes :: Word128 -> [Word8]
+wordToBytes w = [fromIntegral (w `shiftR` k) | k <- shifts128]
 
-stringToWord :: String -> Word128
-stringToWord s = fromIntegral (read ("0x" ++ s))
+bytesToWord :: [Word8] -> Word128
+bytesToWord = foldl accum 0
+    where accum a b = (a `shiftL` 8) .|. fromIntegral b
 
-stringToBytes :: String -> [Word8]
-stringToBytes "" = []
-stringToBytes [a] = []
-stringToBytes (a:b:ss) = (read ("0x" ++ [a,b])) : stringToBytes ss
+wordsToBytes = concat . (map wordToBytes)
 
-byteToString :: Word8 -> String
-byteToString b = replicate (2 - length s) '0' ++ s
-    where s = showHex b ""
-
-bytesToString :: [Word8] -> String
-bytesToString = concat . (map byteToString)
-
-wordsToBytes = concat . map (stringToBytes . wordToString)
-
-bytesToWords :: [Word8] -> [Word128]
-bytesToWords bs = map (stringToWord . bytesToString) $ chunksOf 16 bs
-
+bytesToWords = (map bytesToWord) . chunksOf 16
 -- }}}
 
 -- {{{ Time
